@@ -1,0 +1,86 @@
+#!/bin/bash -x
+
+upstream=$1
+target=$2
+
+reponame=$(basename ${upstream})
+
+mkdir ${target} || exit $?
+
+pushd ${target}
+	git clone ${upstream}
+	mkdir ${reponame}-submodules
+	pushd ${reponame}
+		# checkout *an* initial commmit
+		# this gets you off all branches for the --track --force below
+		# repos with 1 or 0 total commits won't work
+		git checkout $(git rev-list --max-parents=0 HEAD | head -n1)
+
+		# loop through the branches; remote-only is easier to parse and because we just cloned, there's no ultimate difference
+		# note: someday learn how to add this into the while/do below because it would be prettier
+		git branch -r | grep -v /HEAD | sed 's#origin/##g' | while read branch
+		do
+			# set up local versions of the same
+			git branch --track --force ${branch} origin/${branch}
+		done
+
+		# loop through all the branches
+		git branch -r | grep -v /HEAD | sed 's#origin/##g' | while read branch
+		do
+			git checkout ${branch}
+			# grab all subdirs
+			find . -mindepth 1 -maxdepth 1 -type d -not -name .git | while read dir
+			do
+				pushd $(dirs -l +1)/${reponame}-submodules
+					# make a new repo for the submodule
+					[[ -d ${dir} ]] || git clone file://$(dirs -l +1) ${dir}
+					pushd ${dir}
+						# checkout current branch and get rid of everything not related to the subdir
+						git checkout ${branch}
+						tempdir=$(mktemp -d)
+						git filter-branch --force -d ${tempdir} --subdirectory-filter ${dir} 
+						rm -rf ${tempdir}
+					popd
+				popd
+			done
+		done
+		# loop through all the newly-created submodule directories
+		pushd $(dirs -l +1)/${reponame}-submodules
+			find . -mindepth 1 -maxdepth 1 -type d | while read dir
+			do
+				pushd ${dir}
+					# loop through all the branches
+					git branch -r | grep -v /HEAD | sed 's#origin/##g' | while read branch
+					do	
+						# in target superproject, get rid of the submodule's 'source' directory,
+						# put a submodule reference in its place, and commit so we can change branches
+						pushd $(dirs -l +2)
+							git checkout ${branch}
+							git rm -rf ${dir}
+							# having to run this twice means its a bug.
+							git submodule add -b . file://$(dirs -l +1)
+							git submodule add -b . file://$(dirs -l +1)
+							git commit -am "change ${dir} to submodule"
+						popd
+					done
+					# does this need to be here?
+					git remote remove origin
+				popd
+			done
+		popd
+		# loop through all the branches of the superproject
+		git branch -r | grep -v /HEAD | sed 's#origin/##g' | while read branch
+		do
+			git checkout ${branch}
+			# two -f options to clear out the submodules checked out from the last branch checked out
+			git clean -f -f -d
+			# either sync up the submodule or delete the directory
+			# (because that submodules doesn't have the current branch in it)
+			find . -mindepth 1 -maxdepth 1 -type d | while read dir
+			do
+				git submodule update --remote ${dir} || git rm -rf ${dir}
+            done
+			git commit -am 'removing empty root sudbdirs'
+		done
+	popd
+popd
